@@ -21,6 +21,56 @@ app.post("/inference", (req, res) => {
 
   res.json({ price, risk, upsell });
 });
+// ====== EMAIL STORAGE ROUTES ======
+import fs from "fs";
+import path from "path";
+
+const EMAIL_FILE = path.join(process.cwd(), "emails.json");
+
+app.post("/email", (req, res) => {
+  const { email, role } = req.body;
+  const entry = { email, role, time: new Date().toISOString() };
+
+  let data = [];
+  if (fs.existsSync(EMAIL_FILE)) {
+    data = JSON.parse(fs.readFileSync(EMAIL_FILE));
+  }
+  data.push(entry);
+  fs.writeFileSync(EMAIL_FILE, JSON.stringify(data, null, 2));
+
+  res.json({ success: true, message: "Saved to local store." });
+});
+
+app.get("/emails", (req, res) => {
+  if (!fs.existsSync(EMAIL_FILE)) return res.json([]);
+  const data = JSON.parse(fs.readFileSync(EMAIL_FILE));
+  res.json(data);
+});
+// ====== EMAIL STORAGE ROUTES ======
+import fs from "fs";
+import path from "path";
+
+const EMAIL_FILE = path.join(process.cwd(), "emails.json");
+
+app.post("/email", (req, res) => {
+  const { email, role } = req.body;
+  const entry = { email, role, time: new Date().toISOString() };
+
+  let data = [];
+  if (fs.existsSync(EMAIL_FILE)) {
+    data = JSON.parse(fs.readFileSync(EMAIL_FILE));
+  }
+  data.push(entry);
+  fs.writeFileSync(EMAIL_FILE, JSON.stringify(data, null, 2));
+
+  res.json({ success: true, message: "Saved to local store." });
+});
+
+app.get("/emails", (req, res) => {
+  if (!fs.existsSync(EMAIL_FILE)) return res.json([]);
+  const data = JSON.parse(fs.readFileSync(EMAIL_FILE));
+  res.json(data);
+});
 
 app.post("/email", (req, res) => {
   const { email, role } = req.body;
