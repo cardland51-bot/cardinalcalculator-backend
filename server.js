@@ -13,14 +13,13 @@ app.get("/", (req, res) => {
   res.send("🚀 Cardinal Calculator backend running on port " + PORT);
 });
 
-// ====== MOCK INFERENCE ROUTE ======
 app.post("/inference", (req, res) => {
-  // Pretend we analyzed an image and return test data
-  res.json({
-    price: 75,
-    risk: 40,
-    upsell: 60
-  });
+  // Generate random demo values
+  const price = Math.floor(Math.random() * 250) + 50;     // $50–$300
+  const risk = Math.floor(Math.random() * 100);           // 0–100%
+  const upsell = Math.floor(Math.random() * 100);         // 0–100%
+
+  res.json({ price, risk, upsell });
 });
 
 app.listen(PORT, () => {
