@@ -22,6 +22,12 @@ app.post("/inference", (req, res) => {
   res.json({ price, risk, upsell });
 });
 
+app.post("/email", (req, res) => {
+  const { email, role } = req.body;
+  console.log("📩 New signup:", email, "as", role);
+  res.json({ success: true, message: "Email received." });
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Cardinal Calculator backend running on port ${PORT}`);
 });
