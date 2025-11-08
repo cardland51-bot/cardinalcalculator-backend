@@ -255,6 +255,41 @@ app.post("/natty", async (req, res) => {
   }
 });
 
+// ====== PRICE ENGINE (GENERAL TIER) ======
+app.post("/price", (req, res) => {
+  try {
+    const body = req.body || {};
+    const risk = typeof body.riskLevel === "number" ? body.riskLevel : 30;
+    const upsell = typeof body.upsellScore === "number" ? body.upsellScore : 40;
+    const tier = body.tier || "free";
+
+    // base ticket for a standard small job
+    let base = 125;
+
+    // nudge based on risk (higher risk = more)
+    const riskAdj = (risk - 30) * 0.5; // ± around 35 bucks over the range
+
+    // nudge based on upsell (more opportunity = slightly stronger anchor)
+    const upsellAdj = upsell * 0.3; // up to +30-ish
+
+    // small bonus if pro tier later (safe for now)
+    const tierAdj = tier === "su" || tier === "founder" ? 15 : 0;
+
+    const target = Math.max(45, Math.round(base + riskAdj + upsellAdj + tierAdj));
+    const min = Math.max(45, target - 40);
+    const max = target + 60;
+
+    res.json({
+      ok: true,
+      corePrice: target,
+      range: { min, target, max }
+    });
+  } catch (err) {
+    console.error("❌ /price error:", err);
+    res.status(500).json({ ok: false, message: "Price engine failed" });
+  }
+});
+
 // ====== START SERVER ======
 app.listen(PORT, () => {
   console.log(`🚀 Cardinal Calculator AI backend running on port ${PORT}`);
