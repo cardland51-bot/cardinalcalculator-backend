@@ -164,6 +164,97 @@ app.post("/speak", async (req, res) => {
   }
 });
 
+// ====== NATTY: SALES SCRIPT & ROLEPLAY ======
+app.post("/natty", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const mode = body.mode || "live_script";
+
+    const summary = body.summary || "";
+    const closePct = body.closePct;
+    const upsellPct = body.upsellPct;
+    const riskPct = body.riskPct;
+    const priceInfo = body.price || {};
+
+    // Core persona (Sales University brain)
+    const systemPrompt =
+      "You are Natty, Cardinal Systems’ sales strategist. " +
+      "Your job: turn yard/photos + estimator outputs into clear, honest, confident offers. " +
+      "Follow the Cardinal Sales Code: no hype, no fake inflation, explain the why. " +
+      "Anchor to scope, labor, materials, longevity, visual impact. " +
+      "Help beat the sloppy cheaper quote without gouging. " +
+      "Talk in short, direct, field-ready language. " +
+      "Use Good/Better/Best where helpful. " +
+      "Output in tight sections, easy to read on a phone. " +
+      "Jared = estimator/ops brain. You = sales voice + trainer.";
+
+    // Build mode-specific instructions
+    var userPrompt = "";
+
+    if (mode === "live_script") {
+      // Real customer script from latest analysis
+      userPrompt =
+        "Context from estimator:\n" +
+        "Summary: " + summary + "\n" +
+        "Close Confidence: " + (closePct || "n/a") + "%\n" +
+        "Upsell Potential: " + (upsellPct || "n/a") + "%\n" +
+        "Risk Factor: " + (riskPct || "n/a") + "%\n" +
+        "Estimated price info: " + JSON.stringify(priceInfo) + "\n\n" +
+        "Task: Generate a client-facing script using this structure:\n" +
+        "A. Quick Read (for rep only): 2 lines: what you see + best angle.\n" +
+        "B. Client Script (use directly):\n" +
+        "   - Open: “Hey [Name], here’s what I’m seeing from your photos…”\n" +
+        "   - Scope & Logic: 1 line each on clean-up/weeds, edging/structure, mulch/coverage, shrubs/shaping, haul-away if needed.\n" +
+        "   - Good / Better / Best options (with honest ranges if possible).\n" +
+        "   - Close: “Most folks choose Better because __. I can get you in on [day/window]. Want me to lock that?”\n" +
+        "C. One Add-On Suggestion: 1 option (edge/depth/shrubs/etc) with one-line why.\n" +
+        "No fluff, just what a real field rep can read off their phone.";
+    } else if (mode === "roleplay_doorknock") {
+      userPrompt =
+        "Start a short role-play. You are a normal homeowner. " +
+        "I am the Cardinal rep at your door. Push back lightly on price and trust. " +
+        "Keep it to 4–6 back-and-forth messages. After the role-play, grade my clarity (A–F) " +
+        "and suggest 1 stronger line I could have used.";
+    } else if (mode === "roleplay_hardnose") {
+      userPrompt =
+        "Start a role-play. You are a hard price shopper. " +
+        "Repeat 'the other guy is cheaper' and accuse me of upselling. " +
+        "Keep it to 6–8 exchanges. After, score me on: (1) value justification, (2) staying calm, (3) removing junk padding. " +
+        "End with 1–2 tactical tips I can apply next time.";
+    } else if (mode === "roleplay_ai_skeptic") {
+      userPrompt =
+        "Start a role-play as a homeowner skeptical of 'AI estimates'. " +
+        "Force me to explain how our tool makes pricing more accurate and fair, not random. " +
+        "At the end, tell me if my explanation built trust (yes/no) and how to tighten it.";
+    } else if (mode === "roleplay_jr_rep") {
+      userPrompt =
+        "Train me as if I am a brand new rep. " +
+        "Ask basic questions, correct me gently when my offer is unclear or underpriced. " +
+        "Keep it encouraging but real, 6–8 messages total.";
+    } else {
+      // Fallback: treat as live_script
+      userPrompt =
+        "Use the estimator context below to generate the standard client-facing script format.\n" +
+        "Summary: " + summary;
+    }
+
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.7,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ]
+    });
+
+    const text = (completion.choices[0].message.content || "").trim();
+    res.json({ ok: true, mode: mode, text: text });
+  } catch (err) {
+    console.error("❌ /natty error:", err);
+    res.status(500).json({ ok: false, error: "Natty failed" });
+  }
+});
+
 // ====== START SERVER ======
 app.listen(PORT, () => {
   console.log(`🚀 Cardinal Calculator AI backend running on port ${PORT}`);
