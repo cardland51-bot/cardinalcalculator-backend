@@ -20,6 +20,25 @@ const client = new OpenAI({
 // for image uploads
 const upload = multer({ dest: "uploads/" });
 
+function pickFocusUpsell(ctx = {}) {
+  const s = (ctx.summary || "").toLowerCase();
+
+  if (s.includes("mulch") || s.includes("bed")) {
+    return "Premium mulch refresh with sharp edges — small ticket, big visual jump, easy yes.";
+  }
+  if (s.includes("shrub") || s.includes("hedge")) {
+    return "Shrub shaping + haul-away — tightens the whole front view in one move.";
+  }
+  if (s.includes("stone") || s.includes("border") || s.includes("edging")) {
+    return "Defined stone/metal edge to lock in beds and raise perceived value.";
+  }
+  if (s.includes("bare") || s.includes("thin")) {
+    return "Targeted topsoil + seed in the worst bare spot to prove you fix problems, not just cover them.";
+  }
+
+  // Safe default
+  return "One focused upgrade: crisp bed edges and clean lines — quickest way to look premium without bloating the bill.";
+}
 // ====== ROOT TEST ROUTE ======
 app.get("/", (req, res) => {
   res.send("🚀 Cardinal Calculator AI backend running on port " + PORT);
@@ -263,32 +282,34 @@ app.post("/price", (req, res) => {
     const upsell = typeof body.upsellScore === "number" ? body.upsellScore : 40;
     const tier = body.tier || "free";
 
-    // base ticket for a standard small job
-    let base = 125;
+    let base = 125; // base ticket for “normal” job
 
-    // nudge based on risk (higher risk = more)
-    const riskAdj = (risk - 30) * 0.5; // ± around 35 bucks over the range
-
-    // nudge based on upsell (more opportunity = slightly stronger anchor)
-    const upsellAdj = upsell * 0.3; // up to +30-ish
-
-    // small bonus if pro tier later (safe for now)
-    const tierAdj = tier === "su" || tier === "founder" ? 15 : 0;
+    const riskAdj = (risk - 30) * 0.5;    // higher risk -> more
+    const upsellAdj = upsell * 0.3;       // more upside -> stronger anchor
+    const tierAdj = (tier === "su" || tier === "founder") ? 15 : 0;
 
     const target = Math.max(45, Math.round(base + riskAdj + upsellAdj + tierAdj));
     const min = Math.max(45, target - 40);
     const max = target + 60;
 
+    const focusUpsell = pickFocusUpsell({
+      summary: body.summary || "",
+      riskLevel: risk,
+      upsellScore: upsell
+    });
+
     res.json({
       ok: true,
       corePrice: target,
-      range: { min, target, max }
+      range: { min, target, max },
+      focusUpsell
     });
   } catch (err) {
     console.error("❌ /price error:", err);
     res.status(500).json({ ok: false, message: "Price engine failed" });
   }
 });
+
 
 // ====== NATTY • SALES UNIVERSITY (TOP-TIER AI CLOSER/TRAINER) ======
 app.post("/natty", async (req, res) => {
@@ -425,6 +446,42 @@ Then recommend one based on the input (if any).
   } catch (err) {
     console.error("❌ /natty error:", err);
     res.status(500).json({ ok: false, message: "Natty failed" });
+  }
+});
+
+// ====== PRICE ENGINE (GENERAL TIER) ======
+app.post("/price", (req, res) => {
+  try {
+    const body = req.body || {};
+    const risk = typeof body.riskLevel === "number" ? body.riskLevel : 30;
+    const upsell = typeof body.upsellScore === "number" ? body.upsellScore : 40;
+    const tier = body.tier || "free";
+
+    let base = 125;
+
+    const riskAdj = (risk - 30) * 0.5;
+    const upsellAdj = upsell * 0.3;
+    const tierAdj = (tier === "su" || tier === "founder") ? 15 : 0;
+
+    const target = Math.max(45, Math.round(base + riskAdj + upsellAdj + tierAdj));
+    const min = Math.max(45, target - 40);
+    const max = target + 60;
+
+    const focusUpsell = pickFocusUpsell({
+      summary: body.summary || "",
+      riskLevel: risk,
+      upsellScore: upsell
+    });
+
+    res.json({
+      ok: true,
+      corePrice: target,
+      range: { min, target, max },
+      focusUpsell
+    });
+  } catch (err) {
+    console.error("❌ /price error:", err);
+    res.status(500).json({ ok: false, message: "Price engine failed" });
   }
 });
 
