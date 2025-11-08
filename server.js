@@ -8,171 +8,209 @@ import OpenAI from "openai";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// ====== MIDDLEWARE ======
-app.use(cors());
-app.use(express.json());
+// ========= HELPERS =========
+function clamp(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return min;
+  return Math.min(max, Math.max(min, n));
+}
 
-// ====== OPENAI CLIENT ======
+// ========= ADMIN CONFIG (LIVE TUNING) =========
+let ADMIN_CONFIG = {
+  model: "gpt-4o-mini",       // Jared's brain
+  priceMultiplier: 1.15,      // global price bias
+  weights: {
+    risk: 40,
+    upsell: 55
+  },
+  flags: {
+    vision: true,
+    tts: true,
+    strict: false,
+    logging: false,
+    autoTune: false
+  }
+};
+
+// ========= OPENAI CLIENT =========
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// for image uploads
+// ========= MIDDLEWARE =========
+app.use(cors());             // open for now; tighten later per domain
+app.use(express.json());
+
+// file upload temp dir
 const upload = multer({ dest: "uploads/" });
 
-function pickFocusUpsell(ctx = {}) {
-  const s = (ctx.summary || "").toLowerCase();
-
-  if (s.includes("mulch") || s.includes("bed")) {
-    return "Premium mulch refresh with sharp edges — small ticket, big visual jump, easy yes.";
-  }
-  if (s.includes("shrub") || s.includes("hedge")) {
-    return "Shrub shaping + haul-away — tightens the whole front view in one move.";
-  }
-  if (s.includes("stone") || s.includes("border") || s.includes("edging")) {
-    return "Defined stone/metal edge to lock in beds and raise perceived value.";
-  }
-  if (s.includes("bare") || s.includes("thin")) {
-    return "Targeted topsoil + seed in the worst bare spot to prove you fix problems, not just cover them.";
-  }
-
-  // Safe default
-  return "One focused upgrade: crisp bed edges and clean lines — quickest way to look premium without bloating the bill.";
-}
-// ====== ROOT TEST ROUTE ======
+// ========= ROOT TEST =========
 app.get("/", (req, res) => {
   res.send("🚀 Cardinal Calculator AI backend running on port " + PORT);
 });
 
-// ====== EMAIL SIGNUP (LIGHTWEIGHT) ======
-// Allows people to pass through; just logs if provided.
+// ========= EMAIL SIGNUP =========
+// Lightweight gate / pass-through: used by landing + homeowner flows
 app.post("/email", (req, res) => {
-  const { email, role } = req.body || {};
-  if (!email) {
-    return res.status(400).json({ ok: false, message: "Missing email" });
-  }
-  console.log(`📩 New signup: ${email} (${role || "unknown"})`);
-  res.json({ ok: true });
-});
-
-// ====== ANALYZE IMAGE (VISION → SUMMARY + METRICS) ======
-app.post("/analyze-image", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
+    const { email, role, area, mode } = req.body || {};
+    if (!email) {
+      return res.status(400).json({ ok: false, error: "Missing email" });
     }
 
-    const imagePath = req.file.path;
+    if (ADMIN_CONFIG.flags.logging) {
+      console.log("📩 Signup", { email, role, area, mode });
+    } else {
+      console.log(`📩 New signup: ${email} (${role || "unknown"})`);
+    }
 
-    // Read file and send as base64 data URL to OpenAI
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("❌ /email error:", err);
+    return res.status(500).json({ ok: false, error: "Email capture failed" });
+  }
+});
+
+// ========= ANALYZE IMAGE (HERO: ONE SWITCH) =========
+// Used by BOTH:
+// - Homeowner Lawn Check (friendly read, no pricing)
+// - Pro / Yard Intelligence (feeds price + intel)
+// Frontend decides how to use result.
+app.post("/analyze-image", upload.single("file"), async (req, res) => {
+  let imagePath;
+  try {
+    if (!req.file) {
+      return res.status(400).json({ ok: false, error: "No file uploaded" });
+    }
+
+    imagePath = req.file.path;
+
     const base64 = fs.readFileSync(imagePath, { encoding: "base64" });
     const dataUrl = `data:image/jpeg;base64,${base64}`;
 
-    const response = await client.chat.completions.create({
-      model: "gpt-4o-mini",
+    const systemPrompt =
+      "You are Jared, a sharp but honest field estimator. " +
+      "Given a yard / exterior / work-zone photo, describe condition, risk, and opportunities " +
+      "in 2–4 short sentences. No fear talk. No product brands.";
+
+    const userPrompt =
+      "Look at this photo. In 2–4 short sentences, describe:\n" +
+      "- overall condition\n" +
+      "- obvious risk flags (slope, clutter, edges, water)\n" +
+      "- simple upsell or tune-up opportunities.";
+
+    const completion = await client.chat.completions.create({
+      model: ADMIN_CONFIG.model || "gpt-4o-mini",
       messages: [
-        {
-          role: "system",
-          content:
-            "You are Jared, a sharp but honest landscape estimator. Analyze yard photos in clean, practical language for scope, condition, and opportunities.",
-        },
+        { role: "system", content: systemPrompt },
         {
           role: "user",
           content: [
-            {
-              type: "text",
-              text: "Look at this yard photo. Describe condition, risk flags, and upsell opportunities in 2–4 short sentences.",
-            },
-            {
-              type: "image_url",
-              image_url: { url: dataUrl },
-            },
-          ],
-        },
-      ],
+            { type: "text", text: userPrompt },
+            { type: "image_url", image_url: { url: dataUrl } }
+          ]
+        }
+      ]
     });
 
-    // Clean up temp file
-    fs.unlinkSync(imagePath);
-
-    const summary = (response.choices?.[0]?.message?.content || "").trim() || 
+    const summary =
+      (completion.choices?.[0]?.message?.content || "").trim() ||
       "Analysis complete. Standard prep and edging recommended.";
 
-    // Simple heuristic scores based on summary text
     const t = summary.toLowerCase();
+
     let close = 60;
     let upsell = 45;
     let risk = 30;
 
-    if (/clean|defined|fresh|crisp|edge|edging|tight/.test(t)) {
+    // Very simple text-based heuristics (safe, tunable)
+    if (/clean|defined|fresh|crisp|edge|edging|tight|tidy/.test(t)) {
       close += 15;
     }
-    if (/overgrown|bare|patchy|erosion|washout|standing water|drain/.test(t)) {
+    if (/overgrown|bare|patchy|erosion|washout|standing water|puddle|drain/.test(t)) {
       risk += 25;
       close -= 10;
     }
-    if (/mulch|stone|border|trim|reshape|bed|plant|upgrade|lighting/.test(t)) {
+    if (/mulch|stone|border|trim|reshape|bed|plant|upgrade|lighting|seal|coat/.test(t)) {
       upsell += 25;
     }
 
-    // clamp
-    close = Math.max(5, Math.min(98, close));
-    upsell = Math.max(5, Math.min(98, upsell));
-    risk = Math.max(3, Math.min(95, risk));
+    close = clamp(close, 5, 98);
+    upsell = clamp(upsell, 5, 98);
+    risk = clamp(risk, 3, 95);
 
-    return res.json({
+    const payload = {
+      ok: true,
       summary,
       closePct: close,
       upsellPct: upsell,
-      riskPct: risk,
-    });
+      riskPct: risk
+      // if you want: attach light hints later:
+      // mode: req.body.mode, source: req.body.source
+    };
+
+    if (ADMIN_CONFIG.flags.logging) {
+      console.log("📷 /analyze-image →", payload);
+    }
+
+    return res.json(payload);
   } catch (err) {
     console.error("❌ /analyze-image error:", err);
-    return res.status(500).json({ error: "Analysis failed" });
+    return res.status(500).json({ ok: false, error: "Analysis failed" });
+  } finally {
+    if (imagePath) {
+      fs.unlink(imagePath, () => {});
+    }
   }
 });
 
-// ====== INFERENCE (TEXT → SHORT ANSWER) ======
+// ========= INFERENCE (TEXT-ONLY, NO FILES) =========
+// Use for: "Jared, given this text blob, help me decide X."
 app.post("/inference", async (req, res) => {
   try {
     const { text } = req.body || {};
-    if (!text) {
-      return res.status(400).json({ error: "Missing text" });
+    if (!text || typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ ok: false, error: "Missing text" });
     }
 
-    const response = await client.chat.completions.create({
-      model: "gpt-4o-mini",
+    const prompt = text.slice(0, 2000);
+
+    const completion = await client.chat.completions.create({
+      model: ADMIN_CONFIG.model || "gpt-4o-mini",
       messages: [
         {
           role: "system",
           content:
-            "You are Jared, a field estimator. Be brief, specific, and practical. Help with pricing logic, scope clarity, and next steps.",
+            "You are Jared, a field estimator. Be concise, concrete, and practical. " +
+            "No fluff. One small decision at a time."
         },
-        { role: "user", content: text },
-      ],
+        { role: "user", content: prompt }
+      ]
     });
 
-    const content = (response.choices?.[0]?.message?.content || "").trim();
-    return res.json({ content });
+    const content = (completion.choices?.[0]?.message?.content || "").trim();
+
+    return res.json({ ok: true, content });
   } catch (err) {
     console.error("❌ /inference error:", err);
-    return res.status(500).json({ error: "Inference failed" });
+    return res.status(500).json({ ok: false, error: "Inference failed" });
   }
 });
 
-// ====== SPEAK (TEXT → AUDIO) ======
+// ========= SPEAK (TEXT → AUDIO) =========
+// Optional helper; frontends can ignore if not using.
 app.post("/speak", async (req, res) => {
   try {
     const { text, voice = "alloy" } = req.body || {};
-    if (!text) {
+    if (!text || typeof text !== "string" || !text.trim()) {
       return res.status(400).send("Missing text");
     }
 
     const mp3 = await client.audio.speech.create({
-      model: "gpt-4o-mini-tts", // or "tts-1" / "tts-1-hd"
+      model: "gpt-4o-mini-tts",  // adjust to your available TTS model
       voice,
-      input: text,
-    }); // :contentReference[oaicite:0]{index=0}
+      input: text.slice(0, 1000)
+    });
 
     const buffer = Buffer.from(await mp3.arrayBuffer());
     res.setHeader("Content-Type", "audio/mpeg");
@@ -183,309 +221,178 @@ app.post("/speak", async (req, res) => {
   }
 });
 
-// ====== NATTY: SALES SCRIPT & ROLEPLAY ======
-app.post("/natty", async (req, res) => {
+// ========= PRICE ENGINE =========
+// Pro lane: called AFTER /analyze-image using its metrics.
+app.post("/price", (req, res) => {
   try {
-    const body = req.body || {};
-    const mode = body.mode || "live_script";
+    const {
+      sqft = 0,
+      baseType = "mulch",     // mulch | cleanup | edging | premium
+      complexity = "normal",  // easy | normal | complex
+      riskLevel,
+      upsellScore
+    } = req.body || {};
 
-    const summary = body.summary || "";
-    const closePct = body.closePct;
-    const upsellPct = body.upsellPct;
-    const riskPct = body.riskPct;
-    const priceInfo = body.price || {};
+    const sq = Number(sqft) || 0;
 
-    // Core persona (Sales University brain)
-    const systemPrompt =
-      "You are Natty, Cardinal Systems’ sales strategist. " +
-      "Your job: turn yard/photos + estimator outputs into clear, honest, confident offers. " +
-      "Follow the Cardinal Sales Code: no hype, no fake inflation, explain the why. " +
-      "Anchor to scope, labor, materials, longevity, visual impact. " +
-      "Help beat the sloppy cheaper quote without gouging. " +
-      "Talk in short, direct, field-ready language. " +
-      "Use Good/Better/Best where helpful. " +
-      "Output in tight sections, easy to read on a phone. " +
-      "Jared = estimator/ops brain. You = sales voice + trainer.";
+    const BASE_RATES = {
+      mulch: 0.18,
+      cleanup: 0.22,
+      edging: 0.25,
+      premium: 0.30
+    };
 
-    // Build mode-specific instructions
-    var userPrompt = "";
+    let baseRate = BASE_RATES[baseType] || BASE_RATES.mulch;
 
-    if (mode === "live_script") {
-      // Real customer script from latest analysis
-      userPrompt =
-        "Context from estimator:\n" +
-        "Summary: " + summary + "\n" +
-        "Close Confidence: " + (closePct || "n/a") + "%\n" +
-        "Upsell Potential: " + (upsellPct || "n/a") + "%\n" +
-        "Risk Factor: " + (riskPct || "n/a") + "%\n" +
-        "Estimated price info: " + JSON.stringify(priceInfo) + "\n\n" +
-        "Task: Generate a client-facing script using this structure:\n" +
-        "A. Quick Read (for rep only): 2 lines: what you see + best angle.\n" +
-        "B. Client Script (use directly):\n" +
-        "   - Open: “Hey [Name], here’s what I’m seeing from your photos…”\n" +
-        "   - Scope & Logic: 1 line each on clean-up/weeds, edging/structure, mulch/coverage, shrubs/shaping, haul-away if needed.\n" +
-        "   - Good / Better / Best options (with honest ranges if possible).\n" +
-        "   - Close: “Most folks choose Better because __. I can get you in on [day/window]. Want me to lock that?”\n" +
-        "C. One Add-On Suggestion: 1 option (edge/depth/shrubs/etc) with one-line why.\n" +
-        "No fluff, just what a real field rep can read off their phone.";
-    } else if (mode === "roleplay_doorknock") {
-      userPrompt =
-        "Start a short role-play. You are a normal homeowner. " +
-        "I am the Cardinal rep at your door. Push back lightly on price and trust. " +
-        "Keep it to 4–6 back-and-forth messages. After the role-play, grade my clarity (A–F) " +
-        "and suggest 1 stronger line I could have used.";
-    } else if (mode === "roleplay_hardnose") {
-      userPrompt =
-        "Start a role-play. You are a hard price shopper. " +
-        "Repeat 'the other guy is cheaper' and accuse me of upselling. " +
-        "Keep it to 6–8 exchanges. After, score me on: (1) value justification, (2) staying calm, (3) removing junk padding. " +
-        "End with 1–2 tactical tips I can apply next time.";
-    } else if (mode === "roleplay_ai_skeptic") {
-      userPrompt =
-        "Start a role-play as a homeowner skeptical of 'AI estimates'. " +
-        "Force me to explain how our tool makes pricing more accurate and fair, not random. " +
-        "At the end, tell me if my explanation built trust (yes/no) and how to tighten it.";
-    } else if (mode === "roleplay_jr_rep") {
-      userPrompt =
-        "Train me as if I am a brand new rep. " +
-        "Ask basic questions, correct me gently when my offer is unclear or underpriced. " +
-        "Keep it encouraging but real, 6–8 messages total.";
-    } else {
-      // Fallback: treat as live_script
-      userPrompt =
-        "Use the estimator context below to generate the standard client-facing script format.\n" +
-        "Summary: " + summary;
+    let complexityMult = 1.0;
+    if (complexity === "easy") complexityMult = 0.9;
+    if (complexity === "complex") complexityMult = 1.25;
+
+    const risk = clamp(
+      typeof riskLevel === "number" ? riskLevel : ADMIN_CONFIG.weights.risk,
+      0,
+      100
+    );
+    const upsell = clamp(
+      typeof upsellScore === "number" ? upsellScore : ADMIN_CONFIG.weights.upsell,
+      0,
+      100
+    );
+
+    const riskMult = 1 + (risk / 100) * 0.18;     // up to +18%
+    const upsellAdd = (upsell / 100) * 75;        // suggestion buffer
+    const adminMult = ADMIN_CONFIG.priceMultiplier || 1.0;
+
+    const materialAndLabor = sq * baseRate * complexityMult;
+    const corePrice = materialAndLabor * riskMult * adminMult;
+
+    const roundedCore = Math.round(corePrice / 5) * 5;
+    const suggestedHigh = Math.round((roundedCore + upsellAdd) / 5) * 5;
+    const suggestedLow = Math.max(0, Math.round(roundedCore * 0.92 / 5) * 5);
+
+    const payload = {
+      ok: true,
+      sqft: sq,
+      baseType,
+      complexity,
+      corePrice: roundedCore,
+      range: {
+        low: suggestedLow,
+        target: roundedCore,
+        withUpsell: suggestedHigh
+      },
+      configUsed: {
+        model: ADMIN_CONFIG.model,
+        priceMultiplier: ADMIN_CONFIG.priceMultiplier,
+        weights: ADMIN_CONFIG.weights
+      },
+      notes: [
+        `Base rate: $${baseRate.toFixed(2)}/sqft`,
+        `Complexity x${complexityMult.toFixed(2)}, Risk x${riskMult.toFixed(2)}, Admin x${adminMult.toFixed(2)}`,
+        `Upsell signal: ${upsell}/100 → +$${Math.round(upsellAdd)} potential add-ons`
+      ]
+    };
+
+    if (ADMIN_CONFIG.flags.logging) {
+      console.log("💵 /price:", payload);
     }
 
+    return res.json(payload);
+  } catch (err) {
+    console.error("❌ /price error:", err);
+    return res.status(500).json({ ok: false, error: "Price calc failed" });
+  }
+});
+
+// ========= PRO: JOB INTEL / PLAYBOOK =========
+// Gated: Pro / SU / Founder tiers hit this, not free.
+app.post("/pro/job-intel", async (req, res) => {
+  try {
+    const {
+      summary,
+      closePct,
+      riskPct,
+      upsellPct
+    } = req.body || {};
+
+    if (!summary) {
+      return res.status(400).json({ ok: false, error: "Missing summary" });
+    }
+
+    const tier = req.headers["x-cardinal-tier"] || "free";
+    if (tier === "free") {
+      return res.status(403).json({
+        ok: false,
+        error: "Upgrade required for job intel."
+      });
+    }
+
+    const prompt = `
+Given:
+- Summary: """${summary}"""
+- Close: ${closePct ?? "n/a"}
+- Risk: ${riskPct ?? "n/a"}
+- Upsell: ${upsellPct ?? "n/a"}
+
+Return a compact JSON object ONLY:
+{
+  "jobType": "...",
+  "difficulty": "easy|standard|complex",
+  "crewPlan": {
+    "crewSize": 2,
+    "hours": 4,
+    "notes": "..."
+  },
+  "lineItems": [
+    { "label": "...", "hint": "..." }
+  ],
+  "upsellIdeas": ["..."],
+  "riskFlags": ["..."],
+  "estimationNotes": "1–2 sentences."
+}
+`.trim();
+
     const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.7,
+      model: ADMIN_CONFIG.model || "gpt-4o-mini",
       messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
+        { role: "system", content: "You output STRICT JSON. No markdown, no commentary." },
+        { role: "user", content: prompt }
       ]
     });
 
-    const text = (completion.choices[0].message.content || "").trim();
-    res.json({ ok: true, mode: mode, text: text });
-  } catch (err) {
-    console.error("❌ /natty error:", err);
-    res.status(500).json({ ok: false, error: "Natty failed" });
-  }
-});
+    const raw = (completion.choices?.[0]?.message?.content || "").trim();
 
-// ====== PRICE ENGINE (GENERAL TIER) ======
-app.post("/price", (req, res) => {
-  try {
-    const body = req.body || {};
-    const risk = typeof body.riskLevel === "number" ? body.riskLevel : 30;
-    const upsell = typeof body.upsellScore === "number" ? body.upsellScore : 40;
-    const tier = body.tier || "free";
+    let intel;
+    try {
+      intel = JSON.parse(raw);
+    } catch (e) {
+      console.error("JSON parse fail on /pro/job-intel:", raw);
+      return res.status(500).json({ ok: false, error: "Bad AI format" });
+    }
 
-    let base = 125; // base ticket for “normal” job
-
-    const riskAdj = (risk - 30) * 0.5;    // higher risk -> more
-    const upsellAdj = upsell * 0.3;       // more upside -> stronger anchor
-    const tierAdj = (tier === "su" || tier === "founder") ? 15 : 0;
-
-    const target = Math.max(45, Math.round(base + riskAdj + upsellAdj + tierAdj));
-    const min = Math.max(45, target - 40);
-    const max = target + 60;
-
-    const focusUpsell = pickFocusUpsell({
-      summary: body.summary || "",
-      riskLevel: risk,
-      upsellScore: upsell
-    });
-
-    res.json({
+    const payload = {
       ok: true,
-      corePrice: target,
-      range: { min, target, max },
-      focusUpsell
-    });
+      tier,
+      intel,
+      configUsed: {
+        model: ADMIN_CONFIG.model,
+        weights: ADMIN_CONFIG.weights
+      }
+    };
+
+    if (ADMIN_CONFIG.flags.logging) {
+      console.log("🧠 /pro/job-intel:", payload);
+    }
+
+    return res.json(payload);
   } catch (err) {
-    console.error("❌ /price error:", err);
-    res.status(500).json({ ok: false, message: "Price engine failed" });
+    console.error("❌ /pro/job-intel error:", err);
+    return res.status(500).json({ ok: false, error: "Job intel failed" });
   }
 });
 
-
-// ====== NATTY • SALES UNIVERSITY (TOP-TIER AI CLOSER/TRAINER) ======
-app.post("/natty", async (req, res) => {
-  try {
-    const body = req.body || {};
-    const mode = body.mode || "live_script";
-
-    const summary = (body.summary || "").toString();
-    const closePct = body.closePct ?? null;
-    const upsellPct = body.upsellPct ?? null;
-    const riskPct = body.riskPct ?? null;
-    const price = body.price || null;
-
-    // Core persona + rules
-    const systemPrompt = `
-You are Natty, Cardinal Systems’ sales strategist.
-
-Your job:
-- Turn yard/photo analysis + basic metrics into clear, honest, confident offers.
-- Follow the Cardinal Sales Code: no hype, no fake inflation, explain the WHY.
-- Anchor to scope, labor, materials, longevity, and visual impact.
-- Help beat sloppy/cheap quotes with clarity, not gouging.
-- Always talk in short, direct, field-ready language that fits on a phone screen.
-- Use Good / Better / Best where it helps.
-- Output in tight sections, easy to skim in front of the customer.
-- Jared = estimator/ops. You = sales voice + training coach on top of Sales University.
-`.trim();
-
-    let userPrompt = "";
-
-    if (mode === "live_script") {
-      // Use last analysis + optional price band
-      const priceLine = price && price.range && price.range.target
-        ? `Target band around $${price.range.min || ""}–$${price.range.max || ""}, anchor near $${price.range.target}.`
-        : price && price.corePrice
-        ? `Approx target price around $${price.corePrice}.`
-        : `Use a fair, realistic range based on normal market rates.`;
-
-      userPrompt = `
-We have this yard analysis:
-
-Summary:
-${summary || "(no detailed summary provided)"}
-
-Signals:
-- Close confidence: ${closePct !== null ? closePct + "%" : "n/a"}
-- Upsell potential: ${upsellPct !== null ? upsellPct + "%" : "n/a"}
-- Risk factor: ${riskPct !== null ? riskPct + "%" : "n/a"}
-- Pricing: ${priceLine}
-
-Generate a field-ready sales package in THIS STRUCTURE (no fluff):
-
-A. Quick Read (Internal to Rep)
-- 2–3 bullets: what you see, ideal scope, smart price window.
-
-B. Client-Facing Script
-Write it as if I'm talking to the homeowner:
-- Open: one friendly line.
-- Scope & Logic: 1 line each for:
-  - Clean-up / weeding (if relevant)
-  - Edging / structure
-  - Mulch / coverage
-  - Shrubs / shaping
-  - Haul away (if relevant)
-- Good / Better / Best:
-  - Good = what they asked for.
-  - Better = what actually holds / lasts.
-  - Best = premium version, still honest.
-- Close:
-  - One clean call-to-action:
-    "Most folks choose Better because ___. I can get you in on ___.
-     Want me to lock that in?"
-
-C. One Add-On (Optional)
-- Suggest exactly ONE add-on (edge/depth/shrubs/etc) with one-sentence why.
-
-Keep it under ~260 words. Tight, confident, no emojis.
-`.trim();
-    }
-
-    else if (mode === "roleplay_hardnose") {
-      userPrompt = `
-Run a hard-nose price-shopper training drill.
-
-Behavior:
-- You play the homeowner.
-- You say things like:
-  - "The other guy is cheaper."
-  - "Feels like you're upselling me."
-  - "Why should I pay that much?"
-- Keep it realistic, not cartoonish.
-- 6–8 back-and-forth turns max.
-
-Format:
-1. Start the roleplay. Label your messages as HOMEOWNER:
-2. After the sequence, STOP and:
-   - Grade the rep (A–F) on:
-     • clarity
-     • value explanation
-     • staying calm / not defensive
-   - Give 1–2 example lines they could say better next time.
-
-Do NOT answer for the rep. Only your side + feedback.
-`.trim();
-    }
-
-    else {
-      // Fallback / unknown mode: explain modes
-      userPrompt = `
-Briefly explain available modes:
-- live_script: turn Jared's yard read into a sales script.
-- roleplay_hardnose: simulate a tough price shopper.
-Then recommend one based on the input (if any).
-`.trim();
-    }
-
-    const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-      ],
-      max_tokens: 700,
-      temperature: 0.7
-    });
-
-    const text = (completion.choices?.[0]?.message?.content || "").trim();
-
-    if (!text) {
-      return res.status(500).json({ ok: false, message: "Natty returned empty response." });
-    }
-
-    res.json({ ok: true, text });
-  } catch (err) {
-    console.error("❌ /natty error:", err);
-    res.status(500).json({ ok: false, message: "Natty failed" });
-  }
-});
-
-// ====== PRICE ENGINE (GENERAL TIER) ======
-app.post("/price", (req, res) => {
-  try {
-    const body = req.body || {};
-    const risk = typeof body.riskLevel === "number" ? body.riskLevel : 30;
-    const upsell = typeof body.upsellScore === "number" ? body.upsellScore : 40;
-    const tier = body.tier || "free";
-
-    let base = 125;
-
-    const riskAdj = (risk - 30) * 0.5;
-    const upsellAdj = upsell * 0.3;
-    const tierAdj = (tier === "su" || tier === "founder") ? 15 : 0;
-
-    const target = Math.max(45, Math.round(base + riskAdj + upsellAdj + tierAdj));
-    const min = Math.max(45, target - 40);
-    const max = target + 60;
-
-    const focusUpsell = pickFocusUpsell({
-      summary: body.summary || "",
-      riskLevel: risk,
-      upsellScore: upsell
-    });
-
-    res.json({
-      ok: true,
-      corePrice: target,
-      range: { min, target, max },
-      focusUpsell
-    });
-  } catch (err) {
-    console.error("❌ /price error:", err);
-    res.status(500).json({ ok: false, message: "Price engine failed" });
-  }
-});
-
-// ====== START SERVER ======
+// ========= START =========
 app.listen(PORT, () => {
   console.log(`🚀 Cardinal Calculator AI backend running on port ${PORT}`);
 });
+
